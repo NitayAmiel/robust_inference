@@ -239,9 +239,9 @@ def process_fold(args):
     dataset = TensorDataset(X_train_tensor, error_train_tensor)
     loader = DataLoader(dataset, batch_size=min(256, len(X_train)), shuffle=True)
     
-    # Train neural network
+    # Train neural network (reduced epochs for CV speed)
     nn_ = SimpleNN(X_train_tensor.shape[1]).to(device)
-    train_nn(nn_, loader, epochs=1000, lr=0.01)
+    train_nn(nn_, loader, epochs=100, lr=0.05)
     
     # Get uncertainty predictions
     with torch.no_grad():
@@ -263,7 +263,7 @@ def process_fold(args):
     # Get optimal probs from optimizer
     probs = optimizer.get_optimal_probs()
     
-    num_trials = 200
+    num_trials = 50  # Reduced for speed
     # Generate all random samples at once
     xi = bernoulli.rvs(probs, size=(num_trials, len(probs)))
     probs_ = np.clip(probs, 0.0001, 1.0)
@@ -303,9 +303,8 @@ def constraint_cross_validation(X_bi: np.ndarray, Y_bi: np.ndarray, model, cv_li
                 Y_test = Y_bi[test_idx]
                 process_args.append((X_train, Y_train, X_test, Y_test, model, bg, c, device))
             
-            # Process folds in parallel
-            with Pool() as pool:
-                fold_results = pool.map(process_fold, process_args)
+            # Process folds sequentially (faster than multiprocessing for NN training)
+            fold_results = [process_fold(args) for args in process_args]
             
             cv_error = sum(fold_results)
             cv_error_list.append(cv_error)
@@ -397,7 +396,7 @@ def constraint_cross_validation_regression(X_bi, income_features_unlabeled_bi: n
                 process_args.append((X_train, income_features_unlabeled_train, Y_train, X_test, income_features_unlabeled_test, Y_test, model, bg, c, Hessian_inv, enc, device))
             
             # Process folds in parallel
-            with Pool() as pool:
+            with Pool(processes=k) as pool:
                 fold_results = pool.map(process_fold_regression, process_args)
             
             cv_error = sum(fold_results)
@@ -476,7 +475,7 @@ def constraint_cross_validation_bias(X_bi: np.ndarray, Y_bi: np.ndarray, Yhat_bi
                 process_args.append((X_train, Y_train, Yhat_train, X_test, Y_test, Yhat_test, bg, c, device))
             
             # Process folds in parallel
-            with Pool() as pool:
+            with Pool(processes=k) as pool:
                 fold_results = pool.map(process_fold_bias, process_args)
             
             cv_error = sum(fold_results)
@@ -563,7 +562,7 @@ def constraint_cross_validation_politeness(confidence_bi: np.ndarray, X_bi: np.n
                 process_args.append((confidence_train, X_train, Y_train, Yhat_train, confidence_test, X_test, Y_test, Yhat_test, bg, c, h, device))
             
             # Process folds in parallel
-            with Pool() as pool:
+            with Pool(processes=k) as pool:
                 fold_results = pool.map(process_fold_politeness, process_args)
             
             cv_error = sum(fold_results)
