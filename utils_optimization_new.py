@@ -13,70 +13,65 @@ from multiprocessing import Pool
 from torch.utils.data import DataLoader, TensorDataset
 from utils import ols, active_logistic_pointestimate, logistic_cov
 
-import numpy as np
-from typing import Tuple
-
 
 class GeneralizedPathOptimizer_Torch:
+    """
+    PyTorch-based 2D optimizer for (rho, gamma) using Adam.
+    Handles the robust variance objective with automatic differentiation.
+    """
     def __init__(self, e_hat_burn, pi, nb, n, constraint_sum, device='cuda', gamma_max=1.0):
-        # Move all data to GPU
+        # e_hat_burn is the residual |Y - f(X)|
         self.e_hat_burn = torch.tensor(e_hat_burn, dtype=torch.float32).to(device)
         self.pi = torch.tensor(pi, dtype=torch.float32).to(device)
         self.nb = nb
         self.n = n
-        self.constraint_sum = constraint_sum
+        self.constraint_sum = torch.tensor(constraint_sum, dtype=torch.float32).to(device)
         self.ratio = nb / n
         self.device = device
         self.gamma_max = gamma_max
         
-        # Mask for non-zero pi to avoid log/division errors
         self.mask = self.pi > 0
         self.n_nonzero = torch.sum(self.mask)
 
     def compute_path(self, r, gamma):
         """
-        Differentiable path computation using Power-Mean formula.
-        Uses a smooth approximation to avoid branching (non-differentiable).
+        Computes the Power-Mean path. Normalizes to maintain budget feasibility.
         """
-        eps = 1e-7
+        eps = 1e-8
+        if gamma < 1e-4:
+            # Limit case: Geometric path (log-linear)
+            raw = (self.pi ** (1 - r)) * (self.ratio ** r)
+        else:
+            # Power-Mean Geodesic path
+            raw = ((1 - r) * (self.pi ** gamma) + r * (self.ratio ** gamma)) ** (1 / gamma)
         
-        # Use smooth approximation: as gamma -> 0, this approaches geometric path
-        # We use gamma + eps to avoid division by zero
-        gamma_safe = gamma + eps
-        
-        # Power-Mean Geodesic (works for all gamma > 0)
-        raw = ((1 - r) * (self.pi ** gamma_safe) + r * (self.ratio ** gamma_safe)) ** (1 / gamma_safe)
-        
-        # Normalize to meet budget constraint
+        # Strict normalization to preserve budget E[pi] = nb/n
         probs = (raw / torch.sum(raw)) * self.nb
         return torch.clamp(probs, 1e-10, 1.0)
 
-    def optimize(self, epochs=200, lr=0.1):
-        # We optimize in 'unconstrained space' using sigmoid to map to [0, 1]
-        # Initialize at 0.0 so sigmoid(0.0) = 0.5 (center of the grid)
+    def optimize(self, epochs=250, lr=0.05):
+        # Sigmoid reparameterization to enforce [0, 1] bounds
         r_param = torch.tensor(0.0, requires_grad=True, device=self.device)
         gamma_param = torch.tensor(0.0, requires_grad=True, device=self.device)
         
         optimizer = optim.Adam([r_param, gamma_param], lr=lr)
-        
         best_loss = float('inf')
         best_r, best_gamma = 0.5, 0.5
 
         for epoch in range(epochs):
             optimizer.zero_grad()
-            
-            # Map parameters to [0, 1] for r and [0, gamma_max] for gamma
             r = torch.sigmoid(r_param)
             gamma = torch.sigmoid(gamma_param) * self.gamma_max
             
-            denominator = self.compute_path(r, gamma)
+            p = self.compute_path(r, gamma)
             
-            # Objective: Empirical Variance + Robust Penalty (using 1/p instead of 1/p²)
-            empirical_term = torch.sum((self.e_hat_burn[self.mask]**2) / denominator[self.mask])
-            robust_term = self.constraint_sum * torch.sqrt(torch.sum(1 / denominator[self.mask]))
+            # FIXED: Squared error used to reflect variance
+            empirical_term = torch.sum((self.e_hat_burn[self.mask] ** 2) / p[self.mask])
             
-            loss = (empirical_term + robust_term) / self.n
+            # Robustness penalty based on L2 uncertainty set
+            robust_term = self.constraint_sum * torch.sqrt(torch.sum(1.0 / (p[self.mask] ** 2)))
             
+            loss = (empirical_term + robust_term) / self.n_nonzero
             loss.backward()
             optimizer.step()
             
@@ -87,21 +82,11 @@ class GeneralizedPathOptimizer_Torch:
 
         return best_loss, best_r, best_gamma
 
-
 class PathCurvatureOptimizer_l2:
-    def __init__(self, e_hat_burn: np.ndarray, pi: np.ndarray, nb: float, n: int, constraint_sum: float, gamma_max: float = 1.0):
-        """
-        Optimizes both path curvature (gamma) and interpolation (rho) using burn-in labels.
-        
-        Args:
-            e_hat_burn: Squared error values (Y_burn - f(X_burn))^2 from burn-in data
-            pi: Initial sampling rule (e.g., from model uncertainty)
-            nb: Expected labeling budget
-            n: Total number of samples (labeled + unlabeled)
-            constraint_sum: Robustness radius 'c' for the L2 uncertainty set C
-            gamma_max: Maximum gamma value to search (default 2.0). 
-                       gamma=1 is linear, gamma=2 is quadratic mean.
-        """
+    """
+    Logic for 2D optimization over (rho, gamma) using multiple search methods.
+    """
+    def __init__(self, e_hat_burn, pi, nb, n, constraint_sum, gamma_max=1.0):
         self.e_hat_burn = e_hat_burn
         self.pi = pi
         self.nb = nb
@@ -109,397 +94,132 @@ class PathCurvatureOptimizer_l2:
         self.constraint_sum = constraint_sum
         self.ratio = nb / n
         self.gamma_max = gamma_max
-        
-        # Mask for valid entries (avoid division by zero)
         self.nonzero_mask = self.pi > 0
         self.n_nonzero = np.sum(self.nonzero_mask)
         
-        # Optimal values (set after calling optimize())
         self.optimal_r = None
         self.optimal_gamma = None
-        self.optimal_value = None
         self.optimal_probs = None
 
-    def compute_path(self, r: float, gamma: float = None) -> np.ndarray:
-        """
-        Computes the Power-Mean interpolation path.
-        gamma = 1.0 -> Linear
-        gamma = 0.5 -> Hellinger
-        gamma -> 0  -> Geometric
-        """
-        if gamma is None:
-            gamma = self.optimal_gamma if self.optimal_gamma is not None else 0.0
-            
+    def compute_path(self, r: float, gamma: float) -> np.ndarray:
         if gamma < 1e-5:
-            # Numerical limit: Geometric path (log-linear)
             raw = (self.pi ** (1 - r)) * (self.ratio ** r)
-        elif abs(gamma - 1.0) < 1e-5:
-            # Linear path
-            raw = (1 - r) * self.pi + r * self.ratio
         else:
-            # Generalized Power-Mean Geodesic
             raw = ((1 - r) * (self.pi ** gamma) + r * (self.ratio ** gamma)) ** (1 / gamma)
-        
-        # Normalize to preserve budget constraint E[pi] = nb/n
         probs = (raw / np.sum(raw)) * self.nb
         return np.clip(probs, 1e-10, 1.0)
 
     def objective_function(self, r: float, gamma: float) -> float:
-        """
-        Calculates the robust variance objective (Minimax with L2 constraint).
-        Uses 1/p instead of 1/p² in penalty to better align with actual variance.
-        """
         denominator = self.compute_path(r, gamma)
+        # FIXED: Squared error (e^2/p) as per original variance derivation
         terms = (self.e_hat_burn[self.nonzero_mask] ** 2) / denominator[self.nonzero_mask]
-        # Modified penalty: sqrt(sum(1/p)) instead of sqrt(sum(1/p²))
-        return (np.sum(terms) + self.constraint_sum * np.sqrt(np.sum(1 / denominator[self.nonzero_mask]))) / self.n_nonzero if self.n_nonzero > 0 else 0
+        penalty = self.constraint_sum * np.sqrt(np.sum(1 / (denominator[self.nonzero_mask] ** 2)))
+        return (np.sum(terms) + penalty) / self.n_nonzero if self.n_nonzero > 0 else 0
 
-    def _objective_for_scipy(self, x: np.ndarray) -> float:
-        """Wrapper for scipy optimizer (takes array input)."""
-        r, gamma = x
-        return self.objective_function(r, gamma)
+    def _optimize_grid(self, r_steps, gamma_steps):
+        r_vals = np.linspace(0, 1, r_steps)
+        gamma_vals = np.linspace(0, self.gamma_max, gamma_steps)
+        best_v, best_r, best_g = float('inf'), 1.0, 0.0
+        for g in gamma_vals:
+            for r in r_vals:
+                v = self.objective_function(r, g)
+                if v < best_v: best_v, best_r, best_g = v, r, g
+        return best_v, best_r, best_g
 
-    def _objective_for_skopt(self, x: list) -> float:
-        """Wrapper for skopt optimizer (takes list input)."""
-        r, gamma = x
-        return self.objective_function(r, gamma)
+    def _optimize_scipy(self):
+        bounds = [(0, 1), (0, self.gamma_max)]
+        best_v, best_r, best_g = float('inf'), 1.0, 0.0
+        def func(x): return self.objective_function(x[0], x[1])
+        for x0 in [[0.5, 0.5], [0.0, 0.0], [1.0, 1.0]]:
+            res = minimize(func, x0=x0, method='L-BFGS-B', bounds=bounds)
+            if res.fun < best_v: best_v, best_r, best_g = res.fun, res.x[0], res.x[1]
+        res_de = differential_evolution(func, bounds=bounds, seed=42)
+        if res_de.fun < best_v: best_v, best_r, best_g = res_de.fun, res_de.x[0], res_de.x[1]
+        return best_v, float(best_r), float(best_g)
 
-    def _optimize_bayesian(self) -> Tuple[float, float, float]:
-        """
-        Uses Bayesian optimization (Gaussian Process) to find optimal (r, gamma).
-        
-        Returns:
-            Tuple of (min_objective_value, best_r, best_gamma)
-        """
-        try:
-            res = gp_minimize(
-                self._objective_for_skopt,
-                [(0.0, 1.0), (0.0, self.gamma_max)],  # Bounds for r and gamma
-                n_calls=50,
-                n_random_starts=10,
-                noise=1e-10,
-                random_state=42
-            )
-            return res.fun, float(res.x[0]), float(res.x[1])
-        except Exception:
-            return float('inf'), 1.0, 0.0
+    def _optimize_bayesian(self):
+        def func(x): return self.objective_function(x[0], x[1])
+        res = gp_minimize(func, [(0.0, 1.0), (0.0, self.gamma_max)], n_calls=50, random_state=42)
+        return res.fun, float(res.x[0]), float(res.x[1])
 
-    def _optimize_torch(self, device: str = 'cuda') -> Tuple[float, float, float]:
-        """
-        Uses PyTorch gradient-based optimization with Adam.
-        
-        Returns:
-            Tuple of (min_objective_value, best_r, best_gamma)
-        """
-        try:
-            torch_optimizer = GeneralizedPathOptimizer_Torch(
-                self.e_hat_burn,
-                self.pi,
-                self.nb,
-                self.n,
-                self.constraint_sum,
-                device=device,
-                gamma_max=self.gamma_max
-            )
-            return torch_optimizer.optimize(epochs=200, lr=0.1)
-        except Exception:
-            return float('inf'), 1.0, 0.0
+    def _optimize_torch(self, device):
+        torch_opt = GeneralizedPathOptimizer_Torch(self.e_hat_burn, self.pi, self.nb, self.n, self.constraint_sum, device=device, gamma_max=self.gamma_max)
+        return torch_opt.optimize()
 
-    def _optimize_scipy(self) -> Tuple[float, float, float]:
-        """
-        Uses scipy optimization (L-BFGS-B with multiple starts + differential evolution).
-        
-        Returns:
-            Tuple of (min_objective_value, best_r, best_gamma)
-        """
-        bounds = [(0, 1), (0, self.gamma_max)]  # r in [0,1], gamma in [0, gamma_max]
-        
-        best_value = float('inf')
-        best_r = 1.0
-        best_gamma = 0.0
-        
-        # Strategy 1: L-BFGS-B with multiple starting points
-        starting_points = [
-            [0.5, 0.5],   # center
-            [0.0, 0.0],   # geometric, pure active
-            [1.0, 1.0],   # linear, uniform
-            [0.0, 1.0],   # linear, pure active
-            [1.0, 0.0],   # geometric, uniform
-            [0.25, 0.25],
-            [0.75, 0.75],
-        ]
-        
-        for x0 in starting_points:
-            try:
-                result = minimize(
-                    self._objective_for_scipy,
-                    x0=x0,
-                    method='L-BFGS-B',
-                    bounds=bounds,
-                    options={'maxiter': 100, 'ftol': 1e-8}
-                )
-                if result.fun < best_value:
-                    best_value = result.fun
-                    best_r, best_gamma = result.x
-            except Exception:
-                continue
-        
-        # Strategy 2: Differential Evolution (global optimizer)
-        try:
-            result_de = differential_evolution(
-                self._objective_for_scipy,
-                bounds=bounds,
-                maxiter=100,
-                tol=1e-8,
-                seed=42,
-                workers=1
-            )
-            if result_de.fun < best_value:
-                best_value = result_de.fun
-                best_r, best_gamma = result_de.x
-        except Exception:
-            pass
-        
-        return best_value, float(best_r), float(best_gamma)
-
-    def _optimize_grid(self, r_steps: int = 50, gamma_steps: int = 50) -> Tuple[float, float, float]:
-        """
-        Performs 2D grid search to find optimal (rho, gamma).
-        
-        Returns:
-            Tuple of (min_objective_value, best_r, best_gamma)
-        """
-        r_values = np.linspace(0, 1, r_steps)
-        gamma_values = np.linspace(0, self.gamma_max, gamma_steps)
-
-        best_value = float('inf')
-        best_r = 1.0
-        best_gamma = 0.0
-
-        for gamma in gamma_values:
-            for r in r_values:
-                value = self.objective_function(r, gamma)
-                if value < best_value:
-                    best_value = value
-                    best_r = r
-                    best_gamma = gamma
-        
-        return best_value, best_r, best_gamma
-
-    def optimize(self, r_steps: int = 50, gamma_steps: int = 50, device: str = 'cuda') -> Tuple[float, float, float]:
-        """
-        Runs grid search, scipy optimization, Bayesian optimization, and PyTorch optimization.
-        Returns the best result among all four.
-        
-        Returns:
-            Tuple of (min_objective_value, best_rho, best_gamma)
-        """
-        # Quick sanity check: does gamma actually affect the objective?
-        test_r = 0.5
-        obj_gamma_0 = self.objective_function(test_r, 0.01)
-        obj_gamma_05 = self.objective_function(test_r, 0.5)
-        obj_gamma_1 = self.objective_function(test_r, 1.0)
-        print(f"\n[DEBUG] Objective at r=0.5: gamma=0.01 -> {obj_gamma_0:.6f}, gamma=0.5 -> {obj_gamma_05:.6f}, gamma=1.0 -> {obj_gamma_1:.6f}")
-        print(f"[DEBUG] constraint_sum = {self.constraint_sum:.4f}, gamma_max = {self.gamma_max}")
-        
-        # Debug: check normalization effect
-        for gamma_test in [0.01, 0.5, 1.0]:
-            probs = self.compute_path(test_r, gamma_test)
-            raw_sum = np.sum(probs)
-            prob_std = np.std(probs)
-            prob_min = np.min(probs[self.nonzero_mask])
-            prob_max = np.max(probs[self.nonzero_mask])
-            print(f"[DEBUG] gamma={gamma_test}: sum(p)={raw_sum:.4f}, std(p)={prob_std:.6f}, min(p)={prob_min:.6f}, max(p)={prob_max:.6f}")
-        
-        # Run all four optimization methods
-        grid_value, grid_r, grid_gamma = self._optimize_grid(r_steps, gamma_steps)
-        scipy_value, scipy_r, scipy_gamma = self._optimize_scipy()
-        bayesian_value, bayesian_r, bayesian_gamma = self._optimize_bayesian()
-        torch_value, torch_r, torch_gamma = self._optimize_torch(device=device)
-        
-        # Select the best result among all four
-        method_names = ['Grid Search', 'Scipy (L-BFGS-B + DE)', 'Bayesian (GP)', 'PyTorch (Adam)']
+    def optimize(self, r_steps=50, gamma_steps=50, device='cuda'):
         results = [
-            (grid_value, grid_r, grid_gamma),
-            (scipy_value, scipy_r, scipy_gamma),
-            (bayesian_value, bayesian_r, bayesian_gamma),
-            (torch_value, torch_r, torch_gamma),
+            self._optimize_grid(r_steps, gamma_steps),
+            self._optimize_scipy(),
+            self._optimize_bayesian(),
+            self._optimize_torch(device=device)
         ]
-        
-        # Print comparison ratios (relative to grid search)
-        print("\n=== Optimization Results ===")
-        print(f"{'Method':<25} {'Value':>12} {'Ratio vs Grid':>15}")
-        print("-" * 55)
-        for name, (value, r, gamma) in zip(method_names, results):
-            ratio = value / grid_value if grid_value > 0 else float('inf')
-            print(f"{name:<25} {value:>12.6f} {ratio:>15.4f}")
-        
-        # Find best method
         best_idx = min(range(len(results)), key=lambda i: results[i][0])
-        best_value, best_r, best_gamma = results[best_idx]
-        print("-" * 55)
-        print(f"Winner: {method_names[best_idx]} (r={best_r:.4f}, gamma={best_gamma:.4f})")
-        print("=" * 55 + "\n")
-        
-        # Store optimal values
-        self.optimal_r = best_r
-        self.optimal_gamma = best_gamma
-        self.optimal_value = best_value
-        self.optimal_probs = self.compute_path(best_r, best_gamma)
-                
-        return best_value, best_r, best_gamma
-    
-    def get_optimal_probs(self) -> np.ndarray:
-        """
-        Get optimal probabilities. Must call optimize() first.
-        """
-        if self.optimal_probs is None:
-            raise ValueError("Must call optimize() before get_optimal_probs()")
-        return self.optimal_probs
-
-    def debug_objective_surface(self, r_steps: int = 10, gamma_steps: int = 10):
-        """
-        Print objective values across the (r, gamma) grid to debug optimization.
-        """
-        r_values = np.linspace(0, 1, r_steps)
-        gamma_values = np.linspace(0.01, 1, gamma_steps)  # Avoid gamma=0
-        
-        print("\n=== Objective Surface Debug ===")
-        header = "gamma \\ r"
-        print(f"{header:<8}", end="")
-        for r in r_values:
-            print(f"{r:>8.2f}", end="")
-        print()
-        print("-" * (8 + 8 * r_steps))
-        
-        for gamma in gamma_values:
-            print(f"{gamma:<8.2f}", end="")
-            for r in r_values:
-                val = self.objective_function(r, gamma)
-                print(f"{val:>8.4f}", end="")
-            print()
-        
-        # Find and print the minimum
-        min_val = float('inf')
-        min_r, min_gamma = 0, 0
-        for gamma in gamma_values:
-            for r in r_values:
-                val = self.objective_function(r, gamma)
-                if val < min_val:
-                    min_val = val
-                    min_r, min_gamma = r, gamma
-        
-        print("-" * (8 + 8 * r_steps))
-        print(f"Min value: {min_val:.6f} at r={min_r:.2f}, gamma={min_gamma:.2f}")
-        print("=" * (8 + 8 * r_steps) + "\n")
+        val, r, g = results[best_idx]
+        self.optimal_r, self.optimal_gamma = r, g
+        self.optimal_probs = self.compute_path(r, g)
+        return val, r, g
 
 class MinMaxOptimizer_l2:
+    """
+    Robust sampling optimizer. 
+    Supports 1D geometric path or 2D power-mean path extension.
+    """
     def __init__(self, e_hat: np.ndarray, pi: np.ndarray, nb: float, n: int, constraint_sum: float, use_path: bool = False, gamma_max: float = 1.0):
-        """
-        Initialize the optimizer with known parameters
-        
-        Args:
-            e_hat: Array of error terms
-            pi: Array of pi values
-            nb: nb parameter
-            n: Number of samples
-            constraint_sum: Sum constraint for delta
-            use_path: If True, use PathCurvatureOptimizer_l2 (2D optimization over r and gamma)
-        """
         self.e_hat = e_hat
         self.pi = pi
         self.nb = nb
         self.n = n
         self.constraint_sum = constraint_sum
-        self.n_nonzero = np.sum(self.pi != 0)
-        self.nonzero_mask = self.pi != 0
         self.use_path = use_path
         self.gamma_max = gamma_max
+        self.nonzero_mask = self.pi != 0
+        self.n_nonzero = np.sum(self.nonzero_mask)
         
-        # Optimal values (set after calling optimize())
         self.optimal_r = None
-        self.optimal_gamma = None  # Only used when use_path=True
-        self.optimal_value = None
+        self.optimal_gamma = None
         self.optimal_probs = None
-        
-        # Internal path optimizer (created if use_path=True)
-        self._path_optimizer = None
+
         if self.use_path:
-            self._path_optimizer = PathCurvatureOptimizer_l2(e_hat, pi, nb, n, constraint_sum, gamma_max=gamma_max)
-    
+            self._path_optimizer = PathCurvatureOptimizer_l2(e_hat, pi, nb, n, constraint_sum, gamma_max)
+
     def compute_probs(self, r: float) -> np.ndarray:
-        """
-        Compute sampling probabilities for a given path parameter r.
-        
-        Args:
-            r: Path parameter in [0, 1]. r=0 is pure active, r=1 is uniform.
-            
-        Returns:
-            Array of sampling probabilities
-        """
-        if self.use_path and self._path_optimizer is not None:
-            gamma = self.optimal_gamma if self.optimal_gamma is not None else 0.0
-            return self._path_optimizer.compute_path(r, gamma)
-        
+        # Standard geometric path interpolation
         ratio = self.nb / self.n
-        raw = self.pi ** (1 - r) * ratio ** r
-        probs = raw / np.sum(raw) * self.nb
+        raw = (self.pi ** (1 - r)) * (ratio ** r)
+        probs = (raw / np.sum(raw)) * self.nb
         return np.clip(probs, 0.0, 1.0)
-        
+
     def objective_function(self, r: float) -> float:
         denominator = self.compute_probs(r)
-        terms = (self.e_hat[self.nonzero_mask]**2) / denominator[self.nonzero_mask]
-        return (np.sum(terms) + self.constraint_sum * np.sqrt(np.sum(1/denominator[self.nonzero_mask]**2))) / self.n_nonzero if self.n_nonzero > 0 else 0
-    
-    def optimize(self, r_bounds: Tuple[float, float] = (0, 1), r_steps: int = 100) -> Tuple[float, float]:
-        """
-        Solve the optimization problem and store optimal values.
-        
-        Args:
-            r_bounds: Tuple of (min_r, max_r) to search
-            r_steps: Number of steps for r grid search
-            
-        Returns:
-            Tuple of (optimal_value, optimal_r)
-        """
-        if self.use_path and self._path_optimizer is not None:
-            # Use PathCurvatureOptimizer_l2 for 2D optimization
-            best_value, best_r, best_gamma = self._path_optimizer.optimize(r_steps=r_steps)
-            self.optimal_r = best_r
-            self.optimal_gamma = best_gamma
-            self.optimal_value = best_value
-            self.optimal_probs = self._path_optimizer.get_optimal_probs()
-            return best_value, best_r
-        
-        # Standard 1D optimization over r
-        r_values = np.linspace(r_bounds[0], r_bounds[1], r_steps)
+        # FIXED: Square the error term to minimize variance
+        terms = (self.e_hat[self.nonzero_mask] ** 2) / denominator[self.nonzero_mask]
+        penalty = self.constraint_sum * np.sqrt(np.sum(1 / (denominator[self.nonzero_mask] ** 2)))
+        return (np.sum(terms) + penalty) / self.n_nonzero if self.n_nonzero > 0 else 0
 
-        best_value = float('inf')
-        best_r = None
+    def optimize(self, r_bounds: Tuple[float, float] = (0, 1), r_steps: int = 100, device='cuda') -> Tuple[float, float]:
+        if self.use_path:
+            # 2D Optimization over r and gamma
+            val, r, g = self._path_optimizer.optimize(r_steps=r_steps, device=device)
+            self.optimal_r, self.optimal_gamma = r, g
+            self.optimal_probs = self._path_optimizer.optimal_probs
+            return val, r
+        
+        # Original 1D grid search over r
+        r_values = np.linspace(r_bounds[0], r_bounds[1], r_steps)
+        best_v, best_r = float('inf'), 1.0
         for r in r_values:
-            value = self.objective_function(r)
-            if value < best_value:
-                best_value = value
-                best_r = r
+            v = self.objective_function(r)
+            if v < best_v: best_v, best_r = v, r
         
-        # Store optimal values
         self.optimal_r = best_r
-        self.optimal_value = best_value
+        self.optimal_gamma = 0.0 # Standard Geometric path endpoint
         self.optimal_probs = self.compute_probs(best_r)
-                
-        return best_value, best_r
-    
+        return best_v, best_r
+
     def get_optimal_probs(self) -> np.ndarray:
-        """
-        Get optimal probabilities. Must call optimize() first.
-        
-        Returns:
-            Array of optimal sampling probabilities
-        """
         if self.optimal_probs is None:
-            raise ValueError("Must call optimize() before get_optimal_probs()")
+            raise ValueError("Call optimize() first.")
         return self.optimal_probs
-    
 
 def process_fold(args):
     """Process a single fold of cross-validation"""

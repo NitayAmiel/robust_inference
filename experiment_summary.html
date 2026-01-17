@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Robust Active Inference - Experiment Summary</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 40px; background: #f5f5f5; }
+        .container { max-width: 1200px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        h1 { color: #2c3e50; border-bottom: 3px solid #3498db; padding-bottom: 10px; }
+        h2 { color: #34495e; margin-top: 30px; }
+        h3 { color: #7f8c8d; }
+        table { border-collapse: collapse; width: 100%; margin: 20px 0; }
+        th, td { border: 1px solid #ddd; padding: 12px; text-align: center; }
+        th { background: #3498db; color: white; }
+        tr:nth-child(even) { background: #f9f9f9; }
+        tr:hover { background: #f1f1f1; }
+        .positive { color: #27ae60; font-weight: bold; }
+        .negative { color: #e74c3c; font-weight: bold; }
+        .config-box { background: #ecf0f1; padding: 15px; border-radius: 5px; margin: 10px 0; }
+        .summary-box { background: #e8f6f3; padding: 20px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #1abc9c; }
+        .metric { display: inline-block; margin: 10px 20px; padding: 15px; background: white; border-radius: 5px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        .metric-value { font-size: 24px; font-weight: bold; color: #2c3e50; }
+        .metric-label { font-size: 12px; color: #7f8c8d; }
+        .timestamp { color: #95a5a6; font-size: 12px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔬 Robust Active Inference - Experiment Summary</h1>
+        <p class="timestamp">Generated: 2026-01-14 01:10:19</p>
+        <p><strong>True θ:</strong> 0.7073</p>
+
+        <h2>📊 Configuration: Standard</h2>
+        <div class="config-box">
+            <strong>Budgets:</strong> linspace(0.1, 0.3, 5) | 
+            <strong>Trials:</strong> 200 | 
+            <strong>CV Folds:</strong> 5
+        </div>
+        
+        <div class="summary-box">
+            <h3>Path vs Regular Comparison</h3>
+            <div class="metric">
+                <div class="metric-value positive">+1.90%</div>
+                <div class="metric-label">Width Improvement (Path vs Regular)</div>
+            </div>
+            <div class="metric">
+                <div class="metric-value">0.1%</div>
+                <div class="metric-label">Path Coverage</div>
+            </div>
+            <div class="metric">
+                <div class="metric-value">0.1%</div>
+                <div class="metric-label">Regular Coverage</div>
+            </div>
+        </div>
+        
+        <h3>Optimizer Parameters by Budget</h3>
+        <table>
+            <tr>
+                <th>Budget</th>
+                <th>Path r</th>
+                <th>Path γ</th>
+                <th>Regular r</th>
+                <th>|Δr|</th>
+                <th>Objective Improvement</th>
+            </tr>
+
+            <tr>
+                <td>0.10</td>
+                <td>0.545</td>
+                <td>0.600</td>
+                <td>0.747</td>
+                <td>0.202</td>
+                <td class="negative">-129.49%</td>
+            </tr>
+
+            <tr>
+                <td>0.15</td>
+                <td>0.545</td>
+                <td>0.600</td>
+                <td>0.747</td>
+                <td>0.202</td>
+                <td class="negative">-129.49%</td>
+            </tr>
+
+            <tr>
+                <td>0.20</td>
+                <td>0.545</td>
+                <td>0.600</td>
+                <td>0.747</td>
+                <td>0.202</td>
+                <td class="negative">-129.49%</td>
+            </tr>
+
+            <tr>
+                <td>0.25</td>
+                <td>0.545</td>
+                <td>0.600</td>
+                <td>0.747</td>
+                <td>0.202</td>
+                <td class="negative">-129.47%</td>
+            </tr>
+
+            <tr>
+                <td>0.30</td>
+                <td>0.535</td>
+                <td>0.600</td>
+                <td>0.747</td>
+                <td>0.212</td>
+                <td class="negative">-129.37%</td>
+            </tr>
+
+        </table>
+        
+        <h3>Estimator Performance Summary</h3>
+        <table>
+            <tr>
+                <th>Estimator</th>
+                <th>Mean Width</th>
+                <th>Coverage</th>
+            </tr>
+
+            <tr>
+                <td>active</td>
+                <td>0.0322</td>
+                <td>0.1%</td>
+            </tr>
+
+            <tr>
+                <td>robust (path)</td>
+                <td>0.0294</td>
+                <td>0.1%</td>
+            </tr>
+
+            <tr>
+                <td>robust (regular)</td>
+                <td>0.0299</td>
+                <td>0.1%</td>
+            </tr>
+
+            <tr>
+                <td>uniform</td>
+                <td>0.0319</td>
+                <td>0.1%</td>
+            </tr>
+</table>
+        <h2>📊 Configuration: More Budgets</h2>
+        <div class="config-box">
+            <strong>Budgets:</strong> linspace(0.1, 0.3, 8) | 
+            <strong>Trials:</strong> 150 | 
+            <strong>CV Folds:</strong> 5
+        </div>
+        
+        <div class="summary-box">
+            <h3>Path vs Regular Comparison</h3>
+            <div class="metric">
+                <div class="metric-value positive">+2.17%</div>
+                <div class="metric-label">Width Improvement (Path vs Regular)</div>
+            </div>
+            <div class="metric">
+                <div class="metric-value">0.1%</div>
+                <div class="metric-label">Path Coverage</div>
+            </div>
+            <div class="metric">
+                <div class="metric-value">0.1%</div>
+                <div class="metric-label">Regular Coverage</div>
+            </div>
+        </div>
+        
+        <h3>Optimizer Parameters by Budget</h3>
+        <table>
+            <tr>
+                <th>Budget</th>
+                <th>Path r</th>
+                <th>Path γ</th>
+                <th>Regular r</th>
+                <th>|Δr|</th>
+                <th>Objective Improvement</th>
+            </tr>
+
+            <tr>
+                <td>0.10</td>
+                <td>0.545</td>
+                <td>0.600</td>
+                <td>0.747</td>
+                <td>0.202</td>
+                <td class="negative">-129.49%</td>
+            </tr>
+
+            <tr>
+                <td>0.13</td>
+                <td>0.596</td>
+                <td>0.700</td>
+                <td>0.818</td>
+                <td>0.222</td>
+                <td class="negative">-103.65%</td>
+            </tr>
+
+            <tr>
+                <td>0.16</td>
+                <td>0.545</td>
+                <td>0.600</td>
+                <td>0.747</td>
+                <td>0.202</td>
+                <td class="negative">-129.49%</td>
+            </tr>
+
+            <tr>
+                <td>0.19</td>
+                <td>0.545</td>
+                <td>0.600</td>
+                <td>0.747</td>
+                <td>0.202</td>
+                <td class="negative">-129.49%</td>
+            </tr>
+
+            <tr>
+                <td>0.21</td>
+                <td>0.545</td>
+                <td>0.600</td>
+                <td>0.747</td>
+                <td>0.202</td>
+                <td class="negative">-129.49%</td>
+            </tr>
+
+            <tr>
+                <td>0.24</td>
+                <td>0.596</td>
+                <td>0.700</td>
+                <td>0.818</td>
+                <td>0.222</td>
+                <td class="negative">-103.64%</td>
+            </tr>
+
+            <tr>
+                <td>0.27</td>
+                <td>0.636</td>
+                <td>0.800</td>
+                <td>0.848</td>
+                <td>0.212</td>
+                <td class="negative">-87.86%</td>
+            </tr>
+
+            <tr>
+                <td>0.30</td>
+                <td>0.535</td>
+                <td>0.600</td>
+                <td>0.747</td>
+                <td>0.212</td>
+                <td class="negative">-129.37%</td>
+            </tr>
+
+        </table>
+        
+        <h3>Estimator Performance Summary</h3>
+        <table>
+            <tr>
+                <th>Estimator</th>
+                <th>Mean Width</th>
+                <th>Coverage</th>
+            </tr>
+
+            <tr>
+                <td>active</td>
+                <td>0.0320</td>
+                <td>0.1%</td>
+            </tr>
+
+            <tr>
+                <td>robust (path)</td>
+                <td>0.0292</td>
+                <td>0.1%</td>
+            </tr>
+
+            <tr>
+                <td>robust (regular)</td>
+                <td>0.0298</td>
+                <td>0.1%</td>
+            </tr>
+
+            <tr>
+                <td>uniform</td>
+                <td>0.0317</td>
+                <td>0.1%</td>
+            </tr>
+</table>
+    </div>
+</body>
+</html>
